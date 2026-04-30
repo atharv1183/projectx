@@ -12,6 +12,9 @@ export interface Lead {
   status: LeadStatus;
   source: string;
   assignedTo: string;
+  addedById?: string;
+  addedByName?: string;
+  addedByRole?: 'admin' | 'employee';
   assignedAt: any;
   createdAt: any;
   updatedAt?: any;
@@ -21,6 +24,8 @@ export interface Lead {
   siteVisitPhoto?: string;
   siteVisitLocation?: Location;
   siteVisitAt?: any;
+  siteVisitVerifiedAt?: any;
+  siteVisitVerifiedBy?: string;
 }
 
 export interface Followup {

@@ -156,7 +156,8 @@ export default function ProfilePage({ user, onClose }: ProfilePageProps) {
             </div>
           )}
 
-          <div className="flex gap-3 pt-2">
+          <div className="mt-2 rounded-2xl border border-gray-100 bg-gray-50/60 p-3 sm:p-4">
+            <div className="flex gap-3">
             <button
               type="button"
               onClick={onClose}
@@ -171,6 +172,7 @@ export default function ProfilePage({ user, onClose }: ProfilePageProps) {
             >
               {loading ? 'Updating...' : 'Update Password'}
             </button>
+            </div>
           </div>
         </form>
       </div>

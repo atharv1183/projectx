@@ -23,6 +23,14 @@ service cloud.firestore {
       return isSignedIn() && resourceData.assignedTo == request.auth.uid;
     }
 
+    function canViewLead(resourceData) {
+      return isSignedIn()
+        && (
+          resourceData.assignedTo == request.auth.uid
+          || (resourceData.addedById is string && resourceData.addedById == request.auth.uid)
+        );
+    }
+
     // Validation helpers
     function isValidUser(data) {
       return data.keys().hasAll(['name', 'email', 'phone', 'role', 'createdAt'])
@@ -63,9 +71,10 @@ service cloud.firestore {
     }
 
     function isValidLead(data) {
-      return data.keys().hasAll(['name', 'phone', 'status', 'assignedTo', 'createdAt'])
+      return data.keys().hasAll(['name', 'phone', 'status', 'source', 'assignedTo', 'createdAt'])
         && data.name is string && data.name.size() > 0 && data.name.size() <= 100
         && data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 15
+        && data.source is string && data.source.size() > 0 && data.source.size() <= 100
         && data.status in ['pending', 'interested', 'not_interested', 'deal_pending', 'deal_approved']
         && data.assignedTo is string
         && data.createdAt is timestamp;
@@ -175,9 +184,19 @@ service cloud.firestore {
 
     // Leads
     match /leads/{leadId} {
-      allow get: if isSignedIn() && (isAdmin() || isOwner(resource.data));
-      allow list: if isSignedIn() && (resource.data.assignedTo == request.auth.uid || isAdmin());
-      allow create: if isAdmin() && isValidLead(request.resource.data);
+      allow get: if isSignedIn() && (isAdmin() || canViewLead(resource.data));
+      allow list: if isSignedIn() && (isAdmin() || canViewLead(resource.data));
+      allow create: if isValidLead(request.resource.data) && (
+        isAdmin() ||
+        (
+          request.resource.data.assignedTo == request.auth.uid
+          && request.resource.data.source == 'Employee Added'
+          && request.resource.data.addedById == request.auth.uid
+          && request.resource.data.addedByName is string
+          && request.resource.data.addedByName.size() > 0
+          && request.resource.data.addedByRole == 'employee'
+        )
+      );
       allow update: if (isAdmin() || isOwner(resource.data)) && (
         // Admin can update anything valid
         (isAdmin() && isValidLead(request.resource.data)) ||

@@ -514,7 +514,9 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
 
   const handleAddLead = async (e: FormEvent) => {
     e.preventDefault();
-    if (!leadForm.phone || !leadForm.source) return alert('Phone and Source are mandatory');
+    const normalizedLeadPhone = normalizePhone(leadForm.phone);
+    if (!normalizedLeadPhone || !leadForm.source) return alert('Phone and Source are mandatory');
+    if (normalizedLeadPhone.length !== 10) return alert('Mobile number must be exactly 10 digits.');
     setLoading(true);
 
     try {
@@ -535,10 +537,13 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
 
         await addDoc(collection(db, 'leads'), {
           name: leadForm.name || 'Anonymous',
-          phone: leadForm.phone,
+          phone: normalizedLeadPhone,
           source: leadForm.source,
           status: 'pending',
           assignedTo: assignedEmployee.uid,
+          addedById: user.uid,
+          addedByName: user.name,
+          addedByRole: 'admin',
           assignedAt: serverTimestamp(),
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -558,10 +563,13 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
           const newLeadRef = doc(collection(db, 'leads'));
           transaction.set(newLeadRef, {
             name: leadForm.name || 'Anonymous',
-            phone: leadForm.phone,
+            phone: normalizedLeadPhone,
             source: leadForm.source,
             status: 'pending',
             assignedTo: assignedEmployee.uid,
+            addedById: user.uid,
+            addedByName: user.name,
+            addedByRole: 'admin',
             assignedAt: serverTimestamp(),
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -692,6 +700,35 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
     }
   };
 
+  const handleVerifySiteVisit = async () => {
+    if (!selectedLead || !selectedLead.siteVisitPhoto) return;
+
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'leads', selectedLead.id), {
+        siteVisitVerifiedAt: serverTimestamp(),
+        siteVisitVerifiedBy: user.name,
+        updatedAt: serverTimestamp(),
+      });
+
+      await addDoc(collection(db, 'leads', selectedLead.id, 'followups'), {
+        date: serverTimestamp(),
+        remark: `Admin verified site visit photo and location evidence.`,
+        employeeId: user.uid
+      });
+
+      setSelectedLead({
+        ...selectedLead,
+        siteVisitVerifiedAt: Timestamp.now(),
+        siteVisitVerifiedBy: user.name,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `leads/${selectedLead.id}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-8 pb-20">
       {/* Top Navigation / Tabs */}
@@ -816,6 +853,7 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                   <tr className="bg-gray-50 border-b border-gray-100">
                     <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Client</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Source</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Added By</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Assigned To</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Last Follow-up</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Status</th>
@@ -843,6 +881,11 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                       <td className="px-6 py-4">
                         <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-md uppercase tracking-tighter">
                           {lead.source}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className="text-sm font-medium text-gray-600 bg-gray-100 px-2.5 py-1 rounded-lg">
+                          {lead.addedByName || (lead.addedByRole === 'admin' ? 'Admin' : 'Legacy')}
                         </span>
                       </td>
                       <td className="px-6 py-4">
@@ -895,7 +938,7 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                   ))}
                   {filteredLeads.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="px-6 py-12 text-center text-gray-400 font-medium">
+                      <td colSpan={7} className="px-6 py-12 text-center text-gray-400 font-medium">
                         No leads found in this category.
                       </td>
                     </tr>
@@ -1299,6 +1342,12 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                         </button>
                       </div>
                     </div>
+                    <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                      <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Added By</p>
+                      <p className="text-lg font-bold text-gray-900">
+                        {selectedLead.addedByName || (selectedLead.addedByRole === 'admin' ? 'Admin' : 'Legacy')}
+                      </p>
+                    </div>
                   </div>
 
                   {/* Quick Interaction Panel for Admin */}
@@ -1355,6 +1404,71 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                       </button>
                     </div>
                   </div>
+
+                  {selectedLead.siteVisitPhoto && (
+                    <div className="space-y-4 p-6 bg-violet-50/40 rounded-[32px] border border-violet-100">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                          <MapPin className="text-violet-500" size={20} /> Site Visit Verification
+                        </h4>
+                        {selectedLead.siteVisitVerifiedAt ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-green-100 text-green-700 text-[10px] font-black uppercase tracking-widest">
+                            <CheckCircle2 size={12} /> Verified
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-3 py-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-black uppercase tracking-widest">
+                            Pending Verify
+                          </span>
+                        )}
+                      </div>
+
+                      <a
+                        href={selectedLead.siteVisitPhoto}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block rounded-2xl overflow-hidden border border-violet-100 shadow-sm bg-white"
+                        title="Open full image"
+                      >
+                        <img
+                          src={selectedLead.siteVisitPhoto}
+                          alt="Site visit evidence"
+                          className="w-full h-64 object-cover hover:scale-[1.01] transition-transform"
+                          referrerPolicy="no-referrer"
+                        />
+                      </a>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="p-3 bg-white rounded-xl border border-violet-100">
+                          <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Captured At</p>
+                          <p className="text-sm font-bold text-gray-800">
+                            {selectedLead.siteVisitAt ? formatLeadDate(selectedLead.siteVisitAt) : 'Not available'}
+                          </p>
+                        </div>
+                        <div className="p-3 bg-white rounded-xl border border-violet-100">
+                          <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">GPS Coordinates</p>
+                          <p className="text-sm font-bold text-gray-800 break-all">
+                            {selectedLead.siteVisitLocation
+                              ? `${selectedLead.siteVisitLocation.latitude.toFixed(6)}, ${selectedLead.siteVisitLocation.longitude.toFixed(6)}`
+                              : 'Not available'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {selectedLead.siteVisitVerifiedAt ? (
+                        <p className="text-xs font-semibold text-green-700 bg-green-50 border border-green-100 rounded-xl px-3 py-2">
+                          Verified by {selectedLead.siteVisitVerifiedBy || 'Admin'} on {formatLeadDate(selectedLead.siteVisitVerifiedAt)}.
+                        </p>
+                      ) : (
+                        <button
+                          onClick={handleVerifySiteVisit}
+                          disabled={loading}
+                          className="w-full py-3 bg-violet-600 text-white font-bold rounded-xl shadow-lg shadow-violet-100 hover:bg-violet-700 transition-all active:scale-95 disabled:opacity-50"
+                        >
+                          {loading ? 'Verifying...' : 'Verify Site Visit Evidence'}
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   <div className="space-y-3">
                     <h4 className="font-bold text-gray-900 flex items-center gap-2">
@@ -1529,7 +1643,17 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
               </div>
               <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Mobile Number *</label>
-                <input required value={leadForm.phone} onChange={e => setLeadForm({...leadForm, phone: e.target.value})} className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none" placeholder="10-digit mobile" />
+                <input
+                  required
+                  type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]{10}"
+                  maxLength={10}
+                  value={leadForm.phone}
+                  onChange={e => setLeadForm({...leadForm, phone: normalizePhone(e.target.value).slice(0, 10)})}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="10-digit mobile"
+                />
               </div>
               <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Source *</label>

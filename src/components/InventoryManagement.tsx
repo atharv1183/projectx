@@ -506,6 +506,13 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
   });
 
   const areaUnits = Object.keys(AREA_CONVERSIONS) as Array<keyof typeof AREA_CONVERSIONS>;
+  const areaUnitLabels: Record<keyof typeof AREA_CONVERSIONS, string> = {
+    acre: 'Acre',
+    sqft: 'Sqft',
+    sqyard: 'Sqyard',
+    sqmtr: 'Sqmtr',
+    hectare: 'Hectare',
+  };
 
   return (
     <div className="space-y-8 pb-24 max-w-[1600px] mx-auto">
@@ -618,20 +625,45 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
 
                 {/* Admin Quick Actions */}
                 {isAdmin && item.status === 'pending_approval' && (
-                  <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4">
-                    <button 
-                      onClick={() => handleApprove(item.id, 'approved')}
-                      className="w-14 h-14 rounded-full bg-white text-emerald-600 flex items-center justify-center hover:scale-110 transition-all shadow-2xl"
-                    >
-                      <Check size={28} strokeWidth={3} />
-                    </button>
-                    <button 
-                      onClick={() => handleApprove(item.id, 'rejected')}
-                      className="w-14 h-14 rounded-full bg-white text-rose-600 flex items-center justify-center hover:scale-110 transition-all shadow-2xl"
-                    >
-                      <X size={28} strokeWidth={3} />
-                    </button>
-                  </div>
+                  <>
+                    <div className="absolute top-3 right-3 z-20 flex items-center gap-2 sm:hidden">
+                      <button
+                        onClick={() => handleApprove(item.id, 'approved')}
+                        className="w-12 h-12 rounded-full bg-white text-emerald-600 flex items-center justify-center shadow-xl border border-emerald-100 active:scale-95 transition-all"
+                        aria-label="Approve listing"
+                        title="Approve listing"
+                      >
+                        <Check size={24} strokeWidth={3} />
+                      </button>
+                      <button
+                        onClick={() => handleApprove(item.id, 'rejected')}
+                        className="w-12 h-12 rounded-full bg-white text-rose-600 flex items-center justify-center shadow-xl border border-rose-100 active:scale-95 transition-all"
+                        aria-label="Reject listing"
+                        title="Reject listing"
+                      >
+                        <X size={24} strokeWidth={3} />
+                      </button>
+                    </div>
+
+                    <div className="hidden sm:flex absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity items-center justify-center gap-4">
+                      <button 
+                        onClick={() => handleApprove(item.id, 'approved')}
+                        className="w-14 h-14 rounded-full bg-white text-emerald-600 flex items-center justify-center hover:scale-110 transition-all shadow-2xl"
+                        aria-label="Approve listing"
+                        title="Approve listing"
+                      >
+                        <Check size={28} strokeWidth={3} />
+                      </button>
+                      <button 
+                        onClick={() => handleApprove(item.id, 'rejected')}
+                        className="w-14 h-14 rounded-full bg-white text-rose-600 flex items-center justify-center hover:scale-110 transition-all shadow-2xl"
+                        aria-label="Reject listing"
+                        title="Reject listing"
+                      >
+                        <X size={28} strokeWidth={3} />
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -940,20 +972,19 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <h4 className="text-sm font-black text-slate-900 uppercase tracking-widest">Measurements</h4>
                             <div
-                              className="grid w-full sm:w-auto p-1 bg-white border border-slate-200 rounded-xl overflow-hidden"
-                              style={{ gridTemplateColumns: `repeat(${areaUnits.length}, minmax(0, 1fr))` }}
+                              className="grid w-full grid-cols-3 sm:grid-cols-5 gap-1.5 p-1.5 bg-white border border-slate-200 rounded-xl"
                             >
                                 {areaUnits.map(u => (
                                     <button
                                         key={u}
                                         type="button"
-                                        onClick={() => setFormData({...formData, areaUnit: u as any})}
+                                        onClick={() => setFormData({...formData, areaUnit: u})}
                                         className={cn(
-                                            "min-w-0 px-2 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all text-center",
+                                            "min-w-0 h-8 px-2 rounded-lg text-[10px] font-black uppercase tracking-wide transition-all text-center",
                                             formData.areaUnit === u ? "bg-slate-900 text-white shadow-lg" : "text-slate-400 hover:text-slate-600"
                                         )}
                                     >
-                                        {u}
+                                        {areaUnitLabels[u]}
                                     </button>
                                 ))}
                             </div>
@@ -966,7 +997,7 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                                 step="any"
                                 value={formData.areaValue}
                                 onChange={e => handleAreaChange(e.target.value)}
-                                className="w-full px-8 py-6 bg-white border border-slate-200 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none font-mono font-bold text-2xl text-slate-900 transition-all text-center"
+                                className="w-full px-8 py-6 bg-white border border-slate-200 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none font-mono font-bold tabular-nums text-2xl text-slate-900 transition-all text-center"
                                 placeholder="0.00"
                              />
                            </div>
@@ -976,9 +1007,9 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                                   if (u === formData.areaUnit) return null;
                                   const val = formData.areaValue ? convertArea(Number(formData.areaValue), formData.areaUnit)[u as keyof typeof AREA_CONVERSIONS] : '-';
                                   return (
-                                      <div key={u} className="bg-white/80 p-3 rounded-2xl border border-slate-100/50 flex justify-between items-center">
-                                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{u}</p>
-                                          <p className="text-sm font-mono font-bold text-slate-800">{val}</p>
+                                      <div key={u} className="bg-white min-h-[56px] px-4 py-3 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
+                                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-wide">{areaUnitLabels[u]}</p>
+                                          <p className="text-sm font-mono font-bold tabular-nums text-slate-800 text-right">{val}</p>
                                       </div>
                                   )
                               })}

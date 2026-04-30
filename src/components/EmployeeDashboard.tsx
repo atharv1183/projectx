@@ -92,6 +92,10 @@ function toMillis(value: unknown): number {
   return toDateValue(value)?.getTime() ?? 0;
 }
 
+function normalizePhone(value: string): string {
+  return value.replace(/\D/g, '');
+}
+
 export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User; backSignal?: number }) {
   const [activeTab, setActiveTab] = useState<'pending' | 'today' | 'upcoming' | 'requirements' | 'inventory'>('today');
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -101,6 +105,8 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   const [loading, setLoading] = useState(false);
 
   // New Requirement Form State
+  const [showAddLead, setShowAddLead] = useState(false);
+  const [leadForm, setLeadForm] = useState({ name: '', phone: '', source: 'Employee Added' });
   const [showReqModal, setShowReqModal] = useState(false);
   const [reqForm, setReqForm] = useState({
     name: '',
@@ -137,6 +143,11 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
     }
     processedBackSignalRef.current = backSignal;
 
+    if (showAddLead) {
+      setShowAddLead(false);
+      return;
+    }
+
     if (showReqModal) {
       setShowReqModal(false);
       return;
@@ -165,7 +176,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
     if (activeTab !== 'today') {
       setActiveTab('today');
     }
-  }, [backSignal]);
+  }, [backSignal, showAddLead, showReqModal, showNotifications, showTransferModal, showHistory, selectedLeadIndex, activeTab]);
 
   useEffect(() => {
     const el = tabsScrollRef.current;
@@ -306,19 +317,36 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   };
 
   useEffect(() => {
-    const qLeads = query(
-      collection(db, 'leads'), 
-      where('assignedTo', '==', user.uid)
-    );
-    
-    const unsubscribe = onSnapshot(qLeads, (snapshot) => {
-      const allLeads = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() } as Lead))
+    const qAssigned = query(collection(db, 'leads'), where('assignedTo', '==', user.uid));
+    const qAddedBy = query(collection(db, 'leads'), where('addedById', '==', user.uid));
+
+    const assignedLeads: Lead[] = [];
+    const addedByLeads: Lead[] = [];
+
+    const syncLeads = () => {
+      const merged = [...assignedLeads, ...addedByLeads];
+      const deduped = merged
+        .filter((lead, index, arr) => index === arr.findIndex(item => item.id === lead.id))
         .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-      setLeads(allLeads);
+      setLeads(deduped);
+    };
+
+    const unsubscribeAssigned = onSnapshot(qAssigned, (snapshot) => {
+      assignedLeads.length = 0;
+      snapshot.docs.forEach(item => assignedLeads.push({ id: item.id, ...item.data() } as Lead));
+      syncLeads();
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'leads'));
 
-    return () => unsubscribe();
+    const unsubscribeAddedBy = onSnapshot(qAddedBy, (snapshot) => {
+      addedByLeads.length = 0;
+      snapshot.docs.forEach(item => addedByLeads.push({ id: item.id, ...item.data() } as Lead));
+      syncLeads();
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'leads'));
+
+    return () => {
+      unsubscribeAssigned();
+      unsubscribeAddedBy();
+    };
   }, [user.uid]);
 
   useEffect(() => {
@@ -341,11 +369,14 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   const handleSaveRequirement = async (e: FormEvent) => {
     e.preventDefault();
     if (!reqForm.name || !reqForm.phone || !reqForm.type) return alert('Name, Phone and Type are mandatory');
+    const normalizedPhone = reqForm.phone.replace(/\D/g, '');
+    if (normalizedPhone.length !== 10) return alert('Phone number must be exactly 10 digits.');
     setLoading(true);
 
     try {
       await addDoc(collection(db, 'requirements'), {
         ...reqForm,
+        phone: normalizedPhone,
         employeeId: user.uid,
         employeeName: user.name,
         createdAt: serverTimestamp()
@@ -368,6 +399,39 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
     }
   };
 
+  const handleAddLead = async (e: FormEvent) => {
+    e.preventDefault();
+    const normalizedPhone = normalizePhone(leadForm.phone);
+
+    if (!normalizedPhone) return alert('Mobile number is mandatory.');
+    if (normalizedPhone.length !== 10) return alert('Mobile number must be exactly 10 digits.');
+
+    setLoading(true);
+    try {
+      await addDoc(collection(db, 'leads'), {
+        name: leadForm.name || 'Anonymous',
+        phone: normalizedPhone,
+        source: 'Employee Added',
+        status: 'pending',
+        assignedTo: user.uid,
+        addedById: user.uid,
+        addedByName: user.name,
+        addedByRole: 'employee',
+        assignedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      setLeadForm({ name: '', phone: '', source: 'Employee Added' });
+      setShowAddLead(false);
+      alert('Lead added successfully!');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'leads');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const filteredLeads = leads.filter(l => {
     if (l.status === 'deal_approved' || l.status === 'not_interested') return false;
     
@@ -385,6 +449,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   });
 
   const currentLead = selectedLeadIndex !== null ? filteredLeads[selectedLeadIndex] : null;
+  const canManageCurrentLead = Boolean(currentLead && currentLead.assignedTo === user.uid);
 
   useEffect(() => {
     if (currentLead) {
@@ -401,6 +466,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
   const handleUpdateLead = async (status: Lead['status']) => {
     if (!currentLead) return;
+    if (currentLead.assignedTo !== user.uid) return alert('This lead is not assigned to you. You can only view it.');
     if (!remark) return alert('Remark is mandatory for call made');
     setLoading(true);
 
@@ -495,6 +561,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
   const handleSiteVisit = async () => {
     if (!capturedImage || !location) return alert('Photo and Location are mandatory');
+    if (!currentLead || currentLead.assignedTo !== user.uid) return alert('This lead is not assigned to you. You can only view it.');
     setLoading(true);
 
     try {
@@ -525,6 +592,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
   const handleTransfer = async (targetEmployee: User) => {
     if (!currentLead) return;
+    if (currentLead.assignedTo !== user.uid) return alert('This lead is not assigned to you. You can only view it.');
     if (!confirm(`Transfer lead to ${targetEmployee.name}?`)) return;
     setLoading(true);
 
@@ -763,6 +831,12 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
             <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] font-mono">
               {activeTab} Queue ({filteredLeads.length})
             </h3>
+            <button
+              onClick={() => setShowAddLead(true)}
+              className="px-3 py-2 bg-blue-600 text-white font-black text-[10px] uppercase tracking-widest rounded-xl shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all flex items-center gap-1.5"
+            >
+              <PlusCircle size={14} /> Add Lead
+            </button>
           </div>
           <div className="space-y-3 max-h-none lg:max-h-[calc(100vh-450px)] overflow-visible lg:overflow-y-auto pr-0 lg:pr-2 pb-2 custom-scrollbar">
             {filteredLeads.map((lead, idx) => (
@@ -859,11 +933,25 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                         <div className="bg-slate-900 text-white px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-[0.2em]">
                           {currentLead.source}
                         </div>
+                        {currentLead.addedByName && (
+                          <div className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-[0.2em] border border-blue-100">
+                            Added By: {currentLead.addedByName}
+                          </div>
+                        )}
+                        {!canManageCurrentLead && (
+                          <div className="bg-amber-50 text-amber-600 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-[0.2em] border border-amber-100">
+                            View Only
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                   <div className="flex flex-wrap md:flex-nowrap gap-2 sm:gap-3 w-full md:w-auto">
-                    <button onClick={() => setShowTransferModal(true)} className="flex-1 md:flex-none px-4 sm:px-5 py-2.5 bg-white border border-slate-200 rounded-2xl text-orange-600 hover:bg-orange-50 transition-all shadow-sm flex items-center justify-center gap-2 font-black text-[10px] sm:text-[11px] uppercase tracking-widest">
+                    <button
+                      onClick={() => setShowTransferModal(true)}
+                      disabled={!canManageCurrentLead}
+                      className="flex-1 md:flex-none px-4 sm:px-5 py-2.5 bg-white border border-slate-200 rounded-2xl text-orange-600 hover:bg-orange-50 transition-all shadow-sm flex items-center justify-center gap-2 font-black text-[10px] sm:text-[11px] uppercase tracking-widest disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
                       <ArrowLeftRight size={16} /> Transfer
                     </button>
                     <button onClick={() => setShowHistory(!showHistory)} className="flex-1 md:flex-none px-4 sm:px-5 py-2.5 bg-white border border-slate-200 rounded-2xl text-slate-600 hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-2 font-black text-[10px] sm:text-[11px] uppercase tracking-widest">
@@ -885,6 +973,14 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                 <div className="flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-slate-100">
                   {/* Action Panel */}
                   <div className="flex-1 p-8 md:p-10 space-y-10">
+                    {!canManageCurrentLead && (
+                      <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl">
+                        <p className="text-xs font-black text-amber-600 uppercase tracking-widest">View Only Lead</p>
+                        <p className="text-sm font-medium text-amber-700 mt-1">
+                          This lead is no longer assigned to you. You can view it because you added it.
+                        </p>
+                      </div>
+                    )}
                     <div className="space-y-6">
                       <div className="flex items-center justify-between">
                         <h4 className="font-black text-slate-900 flex items-center gap-2 uppercase text-xs tracking-[0.2em]">
@@ -931,7 +1027,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                       <div className="flex items-end gap-2">
                         <button 
                           onClick={() => handleUpdateLead(currentLead.status)}
-                          disabled={loading || !remark.trim() || !nextDate}
+                          disabled={!canManageCurrentLead || loading || !remark.trim() || !nextDate}
                           className="flex-1 h-[56px] bg-blue-600 text-white font-black text-xs uppercase tracking-widest rounded-2xl hover:bg-blue-700 shadow-2xl shadow-blue-200 disabled:opacity-30 disabled:grayscale transition-all active:scale-95"
                         >
                           Save & Schedule
@@ -942,14 +1038,14 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                       <div className="flex items-center gap-2">
                         <button 
                           onClick={() => handleUpdateLead('interested')}
-                          disabled={loading || !remark.trim()}
+                          disabled={!canManageCurrentLead || loading || !remark.trim()}
                           className="flex-1 py-3 bg-green-50 text-green-600 font-black text-[10px] uppercase tracking-[0.2em] rounded-xl hover:bg-green-100 transition-colors disabled:opacity-30"
                         >
                           Interested
                         </button>
                         <button 
                           onClick={() => handleUpdateLead('not_interested')}
-                          disabled={loading || !remark.trim()}
+                          disabled={!canManageCurrentLead || loading || !remark.trim()}
                           className="flex-1 py-3 bg-rose-50 text-rose-600 font-black text-[10px] uppercase tracking-[0.2em] rounded-xl hover:bg-rose-100 transition-colors disabled:opacity-30"
                         >
                           Not Interested
@@ -959,14 +1055,16 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-slate-100">
                       <button 
                         onClick={startCamera}
-                        className="p-6 border-2 border-dashed border-slate-200 rounded-[32px] flex flex-col items-center justify-center gap-3 text-blue-600 hover:bg-blue-50 transition-all hover:border-blue-300 group"
+                        disabled={!canManageCurrentLead}
+                        className="p-6 border-2 border-dashed border-slate-200 rounded-[32px] flex flex-col items-center justify-center gap-3 text-blue-600 hover:bg-blue-50 transition-all hover:border-blue-300 group disabled:opacity-30 disabled:cursor-not-allowed"
                       >
                         <Camera className="w-8 h-8 group-hover:scale-110 transition-transform text-blue-500" />
                         <span className="font-black text-xs uppercase tracking-widest">Real-time Site Visit</span>
                       </button>
                       <button 
                         onClick={() => handleUpdateLead('deal_pending')}
-                        className="p-6 bg-slate-900 border border-slate-800 rounded-[32px] flex flex-col items-center justify-center gap-3 text-white hover:bg-black shadow-2xl shadow-slate-200 transition-all active:scale-95 group"
+                        disabled={!canManageCurrentLead}
+                        className="p-6 bg-slate-900 border border-slate-800 rounded-[32px] flex flex-col items-center justify-center gap-3 text-white hover:bg-black shadow-2xl shadow-slate-200 transition-all active:scale-95 group disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <ShieldCheck className="w-8 h-8 group-hover:scale-110 transition-transform text-indigo-400" />
                         <span className="font-black text-xs uppercase tracking-widest">Submit for Review</span>
@@ -1289,16 +1387,90 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
           </div>
         )}
 
+        {showAddLead && (
+          <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl max-h-[92vh] overflow-y-auto"
+            >
+              <h3 className="text-2xl font-bold mb-7 text-gray-900">Add New Lead</h3>
+              <form onSubmit={handleAddLead} className="space-y-5">
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Customer Name</label>
+                  <input
+                    required
+                    value={leadForm.name}
+                    onChange={e => setLeadForm({ ...leadForm, name: e.target.value })}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="Enter name"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Mobile Number *</label>
+                  <input
+                    required
+                    type="tel"
+                    inputMode="numeric"
+                    pattern="[0-9]{10}"
+                    maxLength={10}
+                    value={leadForm.phone}
+                    onChange={e => setLeadForm({ ...leadForm, phone: normalizePhone(e.target.value).slice(0, 10) })}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="10-digit mobile"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Source *</label>
+                  <input
+                    value={leadForm.source}
+                    disabled
+                    className="w-full px-4 py-3 bg-gray-100 border border-gray-200 rounded-xl text-gray-500 cursor-not-allowed"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">Allocation Mode</label>
+                  <div className="grid grid-cols-2 gap-2 p-1 bg-gray-100 rounded-xl">
+                    <div className="py-2 text-sm font-bold rounded-lg bg-white text-blue-600 shadow-sm text-center">
+                      Automatic
+                    </div>
+                    <div className="py-2 text-sm font-bold rounded-lg text-gray-400 text-center">
+                      Self
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-6 mt-2 border-t border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddLead(false)}
+                    className="flex-1 py-3.5 font-bold text-gray-500 hover:bg-gray-100 rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 py-3.5 bg-blue-600 text-white font-bold rounded-xl shadow-lg shadow-blue-200 active:scale-95 transition-all disabled:opacity-50"
+                  >
+                    {loading ? 'Adding...' : 'Allocate Lead'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
         {showReqModal && (
-          <div className="fixed inset-0 z-[110] bg-black/70 backdrop-blur-md flex items-center justify-center p-5 sm:p-4">
+          <div className="fixed inset-0 z-[110] bg-black/70 backdrop-blur-md flex items-end sm:items-center justify-center p-2 sm:p-4">
             <motion.div 
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
-              className="w-full max-w-xl bg-white rounded-[36px] sm:rounded-[48px] overflow-hidden shadow-2xl flex flex-col max-h-[88vh]"
+              className="w-full max-w-xl bg-white rounded-[28px] sm:rounded-[48px] overflow-hidden shadow-2xl flex flex-col max-h-[92dvh] sm:max-h-[90vh]"
             >
-              <form onSubmit={handleSaveRequirement}>
-                <div className="p-5 sm:p-10 border-b border-slate-100 bg-blue-50/50">
+              <form onSubmit={handleSaveRequirement} className="flex h-full min-h-0 flex-col">
+                <div className="shrink-0 p-5 sm:p-10 border-b border-slate-100 bg-blue-50/50">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
                       <div className="w-11 h-11 sm:w-14 sm:h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-xl shadow-blue-100">
@@ -1317,7 +1489,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                   </div>
                 </div>
 
-                <div className="p-5 sm:p-10 space-y-5 sm:space-y-6 max-h-[56vh] sm:max-h-[60vh] overflow-y-auto custom-scrollbar">
+                <div className="flex-1 min-h-0 p-5 sm:p-10 space-y-5 sm:space-y-6 overflow-y-auto custom-scrollbar">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
                     <div className="space-y-2">
                       <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Client Name *</label>
@@ -1333,8 +1505,12 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                       <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Phone Number *</label>
                       <input 
                         required
+                        type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]{10}"
+                        maxLength={10}
                         value={reqForm.phone}
-                        onChange={e => setReqForm({...reqForm, phone: e.target.value})}
+                        onChange={e => setReqForm({...reqForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10)})}
                         className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-3xl focus:ring-4 focus:ring-blue-100 outline-none font-bold text-slate-700"
                         placeholder="10-digit mobile number"
                       />
@@ -1392,18 +1568,18 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                   </div>
                 </div>
 
-                <div className="p-5 sm:p-10 pb-6 sm:pb-10 bg-slate-50 border-t border-slate-100 flex flex-col sm:flex-row gap-3 sm:gap-4">
+                <div className="shrink-0 p-3 sm:p-10 pb-4 sm:pb-10 bg-slate-50 border-t border-slate-100 grid grid-cols-2 gap-3 sm:gap-4">
                   <button 
                     type="button" 
                     onClick={() => setShowReqModal(false)}
-                    className="flex-1 py-4 sm:py-5 font-black text-xs uppercase tracking-widest text-slate-400 bg-white rounded-3xl border border-slate-200 hover:bg-slate-100 transition-all"
+                    className="py-3 sm:py-5 font-black text-xs uppercase tracking-widest text-slate-400 bg-white rounded-3xl border border-slate-200 hover:bg-slate-100 transition-all"
                   >
                     Cancel
                   </button>
                   <button 
                     type="submit"
                     disabled={loading}
-                    className="flex-[2] py-4 sm:py-5 bg-blue-600 text-white font-black text-xs uppercase tracking-widest rounded-3xl shadow-2xl shadow-blue-200 hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-50"
+                    className="py-3 sm:py-5 bg-blue-600 text-white font-black text-xs uppercase tracking-widest rounded-3xl shadow-2xl shadow-blue-200 hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-50"
                   >
                     {loading ? 'Adding...' : 'Save Requirement'}
                   </button>
