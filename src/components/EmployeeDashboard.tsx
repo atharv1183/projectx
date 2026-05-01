@@ -35,6 +35,7 @@ import {
   Clock,
   History,
   Send,
+  Search,
   Loader2,
   Users,
   ArrowLeftRight,
@@ -96,6 +97,18 @@ function normalizePhone(value: string): string {
   return value.replace(/\D/g, '');
 }
 
+type LeadQueueTab = 'pending' | 'today' | 'upcoming';
+
+function getLeadQueueTab(lead: Lead): LeadQueueTab | null {
+  if (lead.status === 'deal_approved' || lead.status === 'not_interested') return null;
+
+  const nextDateObj = toDateValue(lead.nextFollowupAt);
+  if (nextDateObj && isToday(nextDateObj)) return 'today';
+  if (!nextDateObj || (isPast(nextDateObj) && !isToday(nextDateObj))) return 'pending';
+  if (nextDateObj && isFuture(nextDateObj) && !isToday(nextDateObj)) return 'upcoming';
+  return null;
+}
+
 export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User; backSignal?: number }) {
   const [activeTab, setActiveTab] = useState<'pending' | 'today' | 'upcoming' | 'requirements' | 'inventory'>('today');
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -120,6 +133,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   const [remark, setRemark] = useState('');
   const [nextDate, setNextDate] = useState('');
   const [showHistory, setShowHistory] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState<Lead['status'] | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [visitStep, setVisitStep] = useState<'idle' | 'capture' | 'confirm' | 'verifying' | 'verified'>('idle');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
@@ -130,6 +144,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
   const [employees, setEmployees] = useState<User[]>([]);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferSearch, setTransferSearch] = useState('');
+  const [leadSearchQuery, setLeadSearchQuery] = useState('');
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const processedBackSignalRef = useRef(0);
@@ -225,16 +240,29 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
       await updateDoc(doc(db, 'notifications', notificationId), { read: true });
       
       if (leadId) {
-        // Find the lead index in our lists
-        const leadIndex = leads.findIndex(l => l.id === leadId);
-        if (leadIndex !== -1) {
-          setSelectedLeadIndex(leadIndex);
-          setShowNotifications(false);
-          // Set filter to 'all' or whichever category contains the lead if needed
-          // For now just opening the modal is usually enough if leads list is populated
-        } else {
+        const targetLead = leads.find(l => l.id === leadId);
+        if (!targetLead) {
           alert('Lead not found in your current list. It might have been reassigned.');
+          return;
         }
+
+        const targetTab = getLeadQueueTab(targetLead);
+        if (!targetTab) {
+          alert('This lead is no longer in your active queue.');
+          return;
+        }
+
+        const targetQueue = leads.filter(l => getLeadQueueTab(l) === targetTab);
+        const leadIndex = targetQueue.findIndex(l => l.id === leadId);
+        if (leadIndex === -1) {
+          alert('Lead could not be opened right now. Please refresh and try again.');
+          return;
+        }
+
+        setActiveTab(targetTab);
+        setLeadSearchQuery('');
+        setSelectedLeadIndex(leadIndex);
+        setShowNotifications(false);
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `notifications/${notificationId}`);
@@ -432,24 +460,27 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
     }
   };
 
-  const filteredLeads = leads.filter(l => {
-    if (l.status === 'deal_approved' || l.status === 'not_interested') return false;
-    
-    let nextDateObj: Date | null = null;
-    if (l.nextFollowupAt instanceof Timestamp) {
-      nextDateObj = l.nextFollowupAt.toDate();
-    } else {
-      nextDateObj = toDateValue(l.nextFollowupAt);
-    }
-    
-    if (activeTab === 'today') return nextDateObj && isToday(nextDateObj);
-    if (activeTab === 'pending') return !nextDateObj || (isPast(nextDateObj) && !isToday(nextDateObj));
-    if (activeTab === 'upcoming') return nextDateObj && isFuture(nextDateObj) && !isToday(nextDateObj);
-    return false;
+  const queueLeads = leads.filter(l => getLeadQueueTab(l) === activeTab);
+  const searchTerm = leadSearchQuery.trim().toLowerCase();
+  const filteredLeads = queueLeads.filter(l => {
+    if (!searchTerm) return true;
+    const searchableText = [
+      l.name,
+      l.phone,
+      l.source,
+      l.status?.replace('_', ' '),
+      l.addedByName,
+      l.lastRemark
+    ].filter(Boolean).join(' ').toLowerCase();
+    return searchableText.includes(searchTerm);
   });
 
   const currentLead = selectedLeadIndex !== null ? filteredLeads[selectedLeadIndex] : null;
   const canManageCurrentLead = Boolean(currentLead && currentLead.assignedTo === user.uid);
+
+  useEffect(() => {
+    setSelectedLeadIndex(null);
+  }, [leadSearchQuery]);
 
   useEffect(() => {
     if (currentLead) {
@@ -462,6 +493,11 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
       });
       return () => unsubscribe();
     }
+  }, [currentLead?.id]);
+
+  useEffect(() => {
+    setSelectedStatus(null);
+    setShowHistory(false);
   }, [currentLead?.id]);
 
   const handleUpdateLead = async (status: Lead['status']) => {
@@ -495,6 +531,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
       setRemark('');
       setNextDate('');
+      setSelectedStatus(null);
       setCapturedImage(null);
       // Move to next lead if exists
       if (selectedLeadIndex !== null && selectedLeadIndex < filteredLeads.length - 1) {
@@ -838,6 +875,18 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
               <PlusCircle size={14} /> Add Lead
             </button>
           </div>
+          <div className="px-4">
+            <div className="relative">
+              <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                value={leadSearchQuery}
+                onChange={e => setLeadSearchQuery(e.target.value)}
+                placeholder="Search by name, number, source..."
+                className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 placeholder:text-slate-400 focus:ring-4 focus:ring-blue-100 focus:border-blue-300 outline-none"
+              />
+            </div>
+          </div>
           <div className="space-y-3 max-h-none lg:max-h-[calc(100vh-450px)] overflow-visible lg:overflow-y-auto pr-0 lg:pr-2 pb-2 custom-scrollbar">
             {filteredLeads.map((lead, idx) => (
               <motion.button
@@ -954,7 +1003,15 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                     >
                       <ArrowLeftRight size={16} /> Transfer
                     </button>
-                    <button onClick={() => setShowHistory(!showHistory)} className="flex-1 md:flex-none px-4 sm:px-5 py-2.5 bg-white border border-slate-200 rounded-2xl text-slate-600 hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-2 font-black text-[10px] sm:text-[11px] uppercase tracking-widest">
+                    <button
+                      onClick={() => setShowHistory(prev => !prev)}
+                      className={cn(
+                        "flex-1 md:flex-none px-4 sm:px-5 py-2.5 border rounded-2xl transition-all shadow-sm flex items-center justify-center gap-2 font-black text-[10px] sm:text-[11px] uppercase tracking-widest",
+                        showHistory
+                          ? "bg-blue-50 border-blue-200 text-blue-700"
+                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      )}
+                    >
                       <History size={16} /> History
                     </button>
                     <button 
@@ -1026,7 +1083,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                       </div>
                       <div className="flex items-end gap-2">
                         <button 
-                          onClick={() => handleUpdateLead(currentLead.status)}
+                          onClick={() => handleUpdateLead(selectedStatus || currentLead.status)}
                           disabled={!canManageCurrentLead || loading || !remark.trim() || !nextDate}
                           className="flex-1 h-[56px] bg-blue-600 text-white font-black text-xs uppercase tracking-widest rounded-2xl hover:bg-blue-700 shadow-2xl shadow-blue-200 disabled:opacity-30 disabled:grayscale transition-all active:scale-95"
                         >
@@ -1037,9 +1094,14 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
                       <div className="flex items-center gap-2">
                         <button 
-                          onClick={() => handleUpdateLead('interested')}
+                          onClick={() => setSelectedStatus('interested')}
                           disabled={!canManageCurrentLead || loading || !remark.trim()}
-                          className="flex-1 py-3 bg-green-50 text-green-600 font-black text-[10px] uppercase tracking-[0.2em] rounded-xl hover:bg-green-100 transition-colors disabled:opacity-30"
+                          className={cn(
+                            "flex-1 py-3 font-black text-[10px] uppercase tracking-[0.2em] rounded-xl transition-colors disabled:opacity-30",
+                            selectedStatus === 'interested'
+                              ? "bg-green-600 text-white shadow-md shadow-green-200"
+                              : "bg-green-50 text-green-600 hover:bg-green-100"
+                          )}
                         >
                           Interested
                         </button>
@@ -1051,6 +1113,9 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                           Not Interested
                         </button>
                       </div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        Choose <span className="text-green-600">Interested</span>, then tap <span className="text-blue-600">Save &amp; Schedule</span> to submit.
+                      </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-slate-100">
                       <button 
@@ -1070,11 +1135,49 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                         <span className="font-black text-xs uppercase tracking-widest">Submit for Review</span>
                       </button>
                     </div>
+
+                    {currentLead.siteVisitPhoto && (
+                      <div className="space-y-4 p-6 bg-violet-50/40 rounded-[32px] border border-violet-100">
+                        <h4 className="font-black text-slate-900 flex items-center gap-2 uppercase text-xs tracking-[0.2em]">
+                          <MapPin className="text-violet-500" size={18} /> Site Visit Evidence
+                        </h4>
+                        <a
+                          href={currentLead.siteVisitPhoto}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block rounded-2xl overflow-hidden border border-violet-100 bg-white shadow-sm"
+                          title="Open full image"
+                        >
+                          <img
+                            src={currentLead.siteVisitPhoto}
+                            alt="Site visit capture"
+                            className="w-full h-52 object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        </a>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="p-3 bg-white rounded-xl border border-violet-100">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Captured At</p>
+                            <p className="text-sm font-bold text-slate-800">
+                              {currentLead.siteVisitAt ? formatDateValue(currentLead.siteVisitAt, 'MMM dd, yyyy hh:mm a', 'Not available') : 'Not available'}
+                            </p>
+                          </div>
+                          <div className="p-3 bg-white rounded-xl border border-violet-100">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">GPS Coordinates</p>
+                            <p className="text-sm font-bold text-slate-800 break-all">
+                              {currentLead.siteVisitLocation
+                                ? `${currentLead.siteVisitLocation.latitude.toFixed(6)}, ${currentLead.siteVisitLocation.longitude.toFixed(6)}`
+                                : 'Not available'}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Sidebar Info/History */}
                   {showHistory && (
-                    <div className="w-full md:w-80 bg-gray-50/50 p-6 md:p-8">
+                    <div className="hidden md:block w-full md:w-80 bg-gray-50/50 p-6 md:p-8">
                       <h4 className="font-bold text-gray-900 mb-6 flex items-center gap-2">
                         <History size={20} className="text-gray-400" /> Timeline
                       </h4>
@@ -1107,6 +1210,45 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
         </div>
       </div>
     )}
+
+      <AnimatePresence>
+        {showHistory && currentLead && (
+          <div className="fixed inset-0 z-[102] bg-black/60 backdrop-blur-sm md:hidden flex items-end">
+            <motion.div
+              initial={{ opacity: 0, y: 24 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 24 }}
+              className="w-full max-h-[78vh] bg-white rounded-t-[28px] shadow-2xl overflow-hidden flex flex-col"
+            >
+              <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+                <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                  <History size={18} className="text-gray-400" /> Timeline
+                </h4>
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="p-2 hover:bg-gray-100 rounded-full text-gray-500"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="overflow-y-auto p-5 space-y-5">
+                <div className="relative space-y-5 before:absolute before:left-3 before:top-2 before:bottom-2 before:w-0.5 before:bg-gray-200">
+                  {followups.map(f => (
+                    <div key={f.id} className="relative pl-8">
+                      <div className="absolute left-1.5 top-1.5 w-3 h-3 rounded-full bg-blue-500 border-4 border-white shadow-sm" />
+                      <p className="text-xs font-bold text-gray-400 mb-1">{formatDateValue(f.date, 'MMM dd, hh:mm a')}</p>
+                      <p className="text-sm text-gray-700 leading-relaxed font-medium bg-white p-3 rounded-xl border border-gray-100 shadow-sm">{f.remark}</p>
+                    </div>
+                  ))}
+                  {followups.length === 0 && (
+                    <p className="text-center py-12 text-gray-400 text-sm italic">New lead. No interaction yet.</p>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Site Visit Workflows */}
       <AnimatePresence>
@@ -1170,7 +1312,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="w-full max-w-lg bg-white rounded-[40px] overflow-hidden shadow-2xl flex flex-col"
+              className="w-full max-w-lg bg-white rounded-[40px] overflow-hidden shadow-2xl flex flex-col max-h-[92dvh]"
             >
               {/* Camera Step */}
               {visitStep === 'capture' && (
@@ -1199,7 +1341,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
 
               {/* Confirm / Preview Step */}
               {(visitStep === 'confirm' || visitStep === 'verifying' || visitStep === 'verified') && (
-                <div className="flex flex-col">
+                <div className="flex flex-col overflow-y-auto">
                   <div className="relative aspect-video bg-gray-100">
                     {capturedImage && <img src={capturedImage} className="w-full h-full object-cover" />}
                     <div className="absolute top-4 right-4">
@@ -1262,11 +1404,11 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                       )}
                     </div>
 
-                    <div className="flex gap-3 pt-2">
+                    <div className="flex flex-col sm:flex-row gap-3 pt-2">
                        <button 
                         onClick={() => { setCapturedImage(null); startCamera(); }}
                         disabled={visitStep === 'verifying' || loading}
-                        className="flex-1 py-4 font-bold text-gray-500 hover:bg-gray-100 rounded-2xl transition-colors border border-gray-100 disabled:opacity-50"
+                        className="w-full sm:flex-1 py-4 font-bold text-gray-500 hover:bg-gray-100 rounded-2xl transition-colors border border-gray-100 disabled:opacity-50"
                        >
                          Retake Photo
                        </button>
@@ -1274,7 +1416,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                        {visitStep === 'confirm' && (
                          <button 
                           onClick={handleVerifyLocation}
-                          className="flex-[1.5] py-4 bg-blue-600 text-white font-bold rounded-2xl shadow-xl shadow-blue-100 active:scale-95 transition-all text-sm uppercase tracking-wider"
+                          className="w-full sm:flex-[1.5] py-4 bg-blue-600 text-white font-bold rounded-2xl shadow-xl shadow-blue-100 active:scale-95 transition-all text-sm uppercase tracking-wider"
                          >
                            Verify GPS & Proceed
                          </button>
@@ -1283,7 +1425,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                        {visitStep === 'verifying' && (
                          <button 
                           disabled
-                          className="flex-[1.5] py-4 bg-blue-400 text-white font-bold rounded-2xl shadow-xl shadow-blue-100 transition-all text-sm uppercase tracking-wider flex items-center justify-center gap-2"
+                          className="w-full sm:flex-[1.5] py-4 bg-blue-400 text-white font-bold rounded-2xl shadow-xl shadow-blue-100 transition-all text-sm uppercase tracking-wider flex items-center justify-center gap-2"
                          >
                            <Loader2 size={18} className="animate-spin" /> Verifying...
                          </button>
@@ -1293,7 +1435,7 @@ export default function EmployeeDashboard({ user, backSignal = 0 }: { user: User
                          <button 
                           onClick={handleSiteVisit}
                           disabled={loading}
-                          className="flex-[1.5] py-4 bg-green-600 text-white font-bold rounded-2xl shadow-xl shadow-green-100 active:scale-95 transition-all text-sm uppercase tracking-wider flex items-center justify-center gap-2"
+                          className="w-full sm:flex-[1.5] py-4 bg-green-600 text-white font-bold rounded-2xl shadow-xl shadow-green-100 active:scale-95 transition-all text-sm uppercase tracking-wider flex items-center justify-center gap-2"
                          >
                            {loading ? <Loader2 size={18} className="animate-spin" /> : 'Finalize Visit'}
                          </button>

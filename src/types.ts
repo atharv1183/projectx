@@ -81,7 +81,7 @@ export interface Requirement {
   createdAt: any;
 }
 
-export type InventoryType = 'zameen' | 'plot' | 'house';
+export type InventoryType = 'zameen' | 'house' | 'others' | 'plot';
 export type HouseType = 'simplex' | 'semi-duplex' | 'duplex';
 export type InventoryStatus = 'draft' | 'pending_approval' | 'approved' | 'rejected';
 
@@ -89,7 +89,10 @@ export interface InventoryItem {
   id: string;
   title: string;
   type: InventoryType;
+  subType?: string;
   // Area in different units
+  areaValue?: number;
+  areaUnit?: 'acre' | 'sqft' | 'sqyard' | 'sqmtr' | 'hectare';
   areaAcre?: number;
   areaSqft?: number;
   areaSqYard?: number;

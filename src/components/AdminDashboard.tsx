@@ -15,6 +15,7 @@ import {
   onSnapshot,
   where,
   limit,
+  getDocs,
   runTransaction,
   writeBatch,
   Timestamp
@@ -43,7 +44,10 @@ import {
   FileText,
   MapPin,
   Trash2,
-  LayoutGrid
+  LayoutGrid,
+  Download,
+  Upload,
+  Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -117,8 +121,11 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
   const saveToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processedBackSignalRef = useRef(0);
   const tabsScrollRef = useRef<HTMLDivElement | null>(null);
+  const leadsImportInputRef = useRef<HTMLInputElement | null>(null);
+  const inventoryImportInputRef = useRef<HTMLInputElement | null>(null);
   const [canScrollTabsLeft, setCanScrollTabsLeft] = useState(false);
   const [canScrollTabsRight, setCanScrollTabsRight] = useState(false);
+  const [dataToolsBusy, setDataToolsBusy] = useState<string | null>(null);
 
   const normalizePhone = (value: string) => value.replace(/\D/g, '');
   const showSaveToast = (title: string, description: string) => {
@@ -130,6 +137,233 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
       setSaveToast(null);
       saveToastTimerRef.current = null;
     }, 4500);
+  };
+
+  const serializeFirestoreValue = (value: any): any => {
+    if (value instanceof Timestamp) {
+      return { __ts: value.toMillis() };
+    }
+    if (value && typeof value === 'object' && typeof value.toDate === 'function') {
+      const parsed = value.toDate();
+      if (parsed instanceof Date && !Number.isNaN(parsed.getTime())) {
+        return { __ts: parsed.getTime() };
+      }
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => serializeFirestoreValue(entry));
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, serializeFirestoreValue(v)])
+      );
+    }
+    return value;
+  };
+
+  const deserializeFirestoreValue = (value: any): any => {
+    if (Array.isArray(value)) {
+      return value.map((entry) => deserializeFirestoreValue(entry));
+    }
+    if (value && typeof value === 'object') {
+      if (typeof value.__ts === 'number') {
+        return Timestamp.fromMillis(value.__ts);
+      }
+      if (typeof value.seconds === 'number' && typeof value.nanoseconds === 'number' && Object.keys(value).length <= 3) {
+        return Timestamp.fromMillis(value.seconds * 1000 + Math.floor(value.nanoseconds / 1000000));
+      }
+      return Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, deserializeFirestoreValue(v)])
+      );
+    }
+    return value;
+  };
+
+  const downloadJsonFile = (filename: string, payload: any) => {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const exportLeadsData = async () => {
+    setDataToolsBusy('export_leads');
+    try {
+      const leadsSnapshot = await getDocs(collection(db, 'leads'));
+      const records = [];
+      for (const leadDoc of leadsSnapshot.docs) {
+        const followupsSnapshot = await getDocs(query(collection(db, 'leads', leadDoc.id, 'followups'), orderBy('date', 'asc')));
+        records.push({
+          id: leadDoc.id,
+          data: serializeFirestoreValue(leadDoc.data()),
+          followups: followupsSnapshot.docs.map((f) => ({
+            id: f.id,
+            data: serializeFirestoreValue(f.data()),
+          })),
+        });
+      }
+
+      downloadJsonFile(
+        `leads-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+        { collection: 'leads', exportedAt: new Date().toISOString(), records }
+      );
+      alert(`Exported ${records.length} leads successfully.`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, 'leads');
+    } finally {
+      setDataToolsBusy(null);
+    }
+  };
+
+  const exportInventoryData = async () => {
+    setDataToolsBusy('export_inventory');
+    try {
+      const snapshot = await getDocs(collection(db, 'inventory'));
+      const records = snapshot.docs.map((d) => ({
+        id: d.id,
+        data: serializeFirestoreValue(d.data()),
+      }));
+      downloadJsonFile(
+        `inventory-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+        { collection: 'inventory', exportedAt: new Date().toISOString(), records }
+      );
+      alert(`Exported ${records.length} inventory items successfully.`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, 'inventory');
+    } finally {
+      setDataToolsBusy(null);
+    }
+  };
+
+  const commitBatchedWrites = async (
+    targetCollection: 'leads' | 'inventory',
+    records: Array<{ id?: string; data: any; followups?: Array<{ id?: string; data: any }> }>
+  ) => {
+    let batch = writeBatch(db);
+    let operations = 0;
+    let importedRows = 0;
+
+    const flush = async () => {
+      if (operations === 0) return;
+      await batch.commit();
+      batch = writeBatch(db);
+      operations = 0;
+    };
+
+    for (const record of records) {
+      const data = deserializeFirestoreValue(record.data || {});
+      const docId = record.id || doc(collection(db, targetCollection)).id;
+      batch.set(doc(db, targetCollection, docId), data);
+      operations += 1;
+      importedRows += 1;
+
+      if (targetCollection === 'leads' && Array.isArray(record.followups)) {
+        for (const followup of record.followups) {
+          const followupId = followup.id || doc(collection(db, 'leads', docId, 'followups')).id;
+          batch.set(doc(db, 'leads', docId, 'followups', followupId), deserializeFirestoreValue(followup.data || {}));
+          operations += 1;
+          if (operations >= 450) {
+            await flush();
+          }
+        }
+      }
+
+      if (operations >= 450) {
+        await flush();
+      }
+    }
+
+    await flush();
+    return importedRows;
+  };
+
+  const importDataFile = async (targetCollection: 'leads' | 'inventory', file: File) => {
+    setDataToolsBusy(`import_${targetCollection}`);
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw);
+      const records = Array.isArray(parsed) ? parsed : parsed?.records;
+
+      if (!Array.isArray(records) || records.length === 0) {
+        alert('Selected file has no records to import.');
+        return;
+      }
+
+      const importedCount = await commitBatchedWrites(targetCollection, records);
+      alert(`Imported ${importedCount} ${targetCollection} records successfully.`);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Import failed. Please verify the JSON file format.');
+    } finally {
+      setDataToolsBusy(null);
+    }
+  };
+
+  const deleteAllFollowupsForLead = async (leadId: string) => {
+    while (true) {
+      const snapshot = await getDocs(query(collection(db, 'leads', leadId, 'followups'), limit(300)));
+      if (snapshot.empty) break;
+
+      const batch = writeBatch(db);
+      snapshot.docs.forEach((docItem) => batch.delete(docItem.ref));
+      await batch.commit();
+    }
+  };
+
+  const clearEntireInventory = async () => {
+    if (!confirm('This will permanently delete ALL inventory records. Continue?')) return;
+    if (!confirm('Please confirm again: delete entire inventory database now?')) return;
+
+    setDataToolsBusy('clear_inventory');
+    try {
+      let deletedCount = 0;
+      while (true) {
+        const snapshot = await getDocs(query(collection(db, 'inventory'), limit(300)));
+        if (snapshot.empty) break;
+        const batch = writeBatch(db);
+        snapshot.docs.forEach((docItem) => {
+          batch.delete(docItem.ref);
+          deletedCount += 1;
+        });
+        await batch.commit();
+      }
+      alert(`Cleared inventory database. Deleted ${deletedCount} documents.`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'inventory');
+    } finally {
+      setDataToolsBusy(null);
+    }
+  };
+
+  const clearEntireLeads = async () => {
+    if (!confirm('This will permanently delete ALL leads and follow-up history. Continue?')) return;
+    if (!confirm('Please confirm again: delete entire leads database now?')) return;
+
+    setDataToolsBusy('clear_leads');
+    try {
+      let deletedLeads = 0;
+      while (true) {
+        const leadsSnapshot = await getDocs(query(collection(db, 'leads'), limit(120)));
+        if (leadsSnapshot.empty) break;
+
+        for (const leadDoc of leadsSnapshot.docs) {
+          await deleteAllFollowupsForLead(leadDoc.id);
+        }
+
+        const batch = writeBatch(db);
+        leadsSnapshot.docs.forEach((leadDoc) => {
+          batch.delete(leadDoc.ref);
+          deletedLeads += 1;
+        });
+        await batch.commit();
+      }
+
+      alert(`Cleared leads database. Deleted ${deletedLeads} leads (with their follow-ups).`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'leads');
+    } finally {
+      setDataToolsBusy(null);
+    }
   };
 
   const handleReallocateAndChangeStatus = async () => {
@@ -429,6 +663,7 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
   };
 
   const [filter, setFilter] = useState<LeadStatus | 'total'>('total');
+  const [leadSearchQuery, setLeadSearchQuery] = useState('');
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<Partial<Lead>>({});
@@ -486,13 +721,29 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
     dealsApproved: leads.filter(l => l.status === 'deal_approved').length
   };
 
-  const filteredLeads = filter === 'total' 
+  const statusFilteredLeads = filter === 'total' 
     ? leads 
     : leads.filter(l => {
         if (filter === 'deal_pending') return l.status === 'deal_pending';
         if (filter === 'deal_approved') return l.status === 'deal_approved';
         return l.status === filter;
       });
+
+  const adminLeadSearchTerm = leadSearchQuery.trim().toLowerCase();
+  const filteredLeads = statusFilteredLeads.filter((l) => {
+    if (!adminLeadSearchTerm) return true;
+    const assignedName = employees.find(e => e.uid === l.assignedTo)?.name || '';
+    const searchableText = [
+      l.name,
+      l.phone,
+      l.source,
+      l.status?.replace('_', ' '),
+      l.addedByName,
+      l.lastRemark,
+      assignedName
+    ].filter(Boolean).join(' ').toLowerCase();
+    return searchableText.includes(adminLeadSearchTerm);
+  });
 
   const deleteEmployee = async (empId: string) => {
     const emp = employees.find(e => e.uid === empId);
@@ -784,6 +1035,101 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
         </button>
       </div>
 
+      <div className="bg-white border border-gray-100 rounded-2xl p-4 sm:p-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-4">
+          <Database size={18} className="text-blue-600" />
+          <h3 className="text-sm font-black text-gray-900 uppercase tracking-wider">Admin Data Tools</h3>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-xl border border-gray-100 p-4 space-y-3">
+            <p className="text-xs font-black uppercase tracking-widest text-gray-500">Leads Database</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={exportLeadsData}
+                className="px-3 py-2 rounded-lg bg-blue-50 text-blue-700 text-xs font-black uppercase tracking-wider hover:bg-blue-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Download size={14} /> Export</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={() => leadsImportInputRef.current?.click()}
+                className="px-3 py-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-black uppercase tracking-wider hover:bg-emerald-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Upload size={14} /> Import</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={clearEntireLeads}
+                className="px-3 py-2 rounded-lg bg-rose-50 text-rose-700 text-xs font-black uppercase tracking-wider hover:bg-rose-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Trash2 size={14} /> Clear All</span>
+              </button>
+            </div>
+            <input
+              ref={leadsImportInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (file) await importDataFile('leads', file);
+                e.currentTarget.value = '';
+              }}
+            />
+          </div>
+
+          <div className="rounded-xl border border-gray-100 p-4 space-y-3">
+            <p className="text-xs font-black uppercase tracking-widest text-gray-500">Inventory Database</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={exportInventoryData}
+                className="px-3 py-2 rounded-lg bg-blue-50 text-blue-700 text-xs font-black uppercase tracking-wider hover:bg-blue-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Download size={14} /> Export</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={() => inventoryImportInputRef.current?.click()}
+                className="px-3 py-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-black uppercase tracking-wider hover:bg-emerald-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Upload size={14} /> Import</span>
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(dataToolsBusy)}
+                onClick={clearEntireInventory}
+                className="px-3 py-2 rounded-lg bg-rose-50 text-rose-700 text-xs font-black uppercase tracking-wider hover:bg-rose-100 transition-colors disabled:opacity-40"
+              >
+                <span className="inline-flex items-center gap-1.5"><Trash2 size={14} /> Clear All</span>
+              </button>
+            </div>
+            <input
+              ref={inventoryImportInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (file) await importDataFile('inventory', file);
+                e.currentTarget.value = '';
+              }}
+            />
+          </div>
+        </div>
+        {dataToolsBusy && (
+          <p className="mt-3 text-[11px] font-bold text-blue-600 uppercase tracking-widest">
+            Processing: {dataToolsBusy.replace('_', ' ')}
+          </p>
+        )}
+      </div>
+
       {activeView === 'leads' ? (
         <>
           {/* Stats Grid */}
@@ -844,6 +1190,16 @@ export default function AdminDashboard({ user, backSignal = 0 }: { user: User; b
                 Add Lead
               </button>
             </div>
+          </div>
+          <div className="relative">
+            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="text"
+              value={leadSearchQuery}
+              onChange={e => setLeadSearchQuery(e.target.value)}
+              placeholder="Search leads by name, number, source, assignee..."
+              className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 rounded-xl text-sm font-medium text-gray-700 placeholder:text-gray-400 focus:ring-4 focus:ring-blue-100 focus:border-blue-300 outline-none"
+            />
           </div>
 
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, FormEvent } from 'react';
+import React, { useState, useEffect, useRef, FormEvent } from 'react';
 import { 
   collection, 
   query, 
@@ -39,6 +39,7 @@ import {
   Upload,
   ChevronDown,
   Info,
+  Share2,
   Clock,
   LayoutGrid,
   FileCheck,
@@ -63,7 +64,47 @@ function MapPicker({ apiKey, latitude, longitude, onPick }: MapPickerProps) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'google-map-script',
     googleMapsApiKey: apiKey,
+    libraries: ['places'],
   });
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
+  const [searchValue, setSearchValue] = useState('');
+  const [searchError, setSearchError] = useState('');
+
+  useEffect(() => {
+    if (!isLoaded || !searchInputRef.current || !window.google?.maps?.places) return;
+
+    if (!autocompleteRef.current) {
+      autocompleteRef.current = new window.google.maps.places.Autocomplete(searchInputRef.current, {
+        fields: ['geometry', 'formatted_address', 'name'],
+      });
+    }
+
+    const autocomplete = autocompleteRef.current;
+    const listener = autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace();
+      if (!place.geometry || !place.geometry.location) {
+        setSearchError('Could not find that location. Please choose from suggestions.');
+        return;
+      }
+
+      const lat = place.geometry.location.lat();
+      const lng = place.geometry.location.lng();
+      onPick(lat, lng);
+      setSearchValue(place.formatted_address || place.name || `${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+      setSearchError('');
+
+      if (mapRef.current) {
+        mapRef.current.panTo({ lat, lng });
+        mapRef.current.setZoom(16);
+      }
+    });
+
+    return () => {
+      window.google.maps.event.removeListener(listener);
+    };
+  }, [isLoaded, onPick]);
 
   const mapContainerStyle = {
     width: '100%',
@@ -88,11 +129,29 @@ function MapPicker({ apiKey, latitude, longitude, onPick }: MapPickerProps) {
   }
 
   return (
-    <div className="border-4 border-slate-50 rounded-[32px] overflow-hidden shadow-inner">
+    <div className="border-4 border-slate-50 rounded-[32px] overflow-hidden shadow-inner bg-white">
+      <div className="p-3 sm:p-4 border-b border-slate-100">
+        <input
+          ref={searchInputRef}
+          value={searchValue}
+          onChange={(e) => {
+            setSearchValue(e.target.value);
+            if (searchError) setSearchError('');
+          }}
+          placeholder="Search location or address..."
+          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-4 focus:ring-blue-100 outline-none text-sm font-medium text-slate-700"
+        />
+        {searchError && (
+          <p className="mt-2 text-[11px] font-bold text-rose-500">{searchError}</p>
+        )}
+      </div>
       <GoogleMap
         mapContainerStyle={mapContainerStyle}
         center={{ lat: latitude, lng: longitude }}
         zoom={15}
+        onLoad={(map) => {
+          mapRef.current = map;
+        }}
         onClick={(e) => {
           if (e.latLng) {
             onPick(e.latLng.lat(), e.latLng.lng());
@@ -177,11 +236,21 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 
 export default function InventoryManagement({ user, onBack }: InventoryManagementProps) {
   const isAdmin = user.role === 'admin';
+  type AreaUnit = keyof typeof AREA_CONVERSIONS;
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState<'all' | 'pending' | 'approved' | 'draft'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [advancedFilters, setAdvancedFilters] = useState({
+    state: '',
+    city: '',
+    area: '',
+    minBudget: '',
+    maxBudget: '',
+    minSize: '',
+    maxSize: '',
+  });
 
   // Form State
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
@@ -189,7 +258,8 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
     title: '',
     type: 'zameen' as InventoryType,
     areaValue: '' as string | number,
-    areaUnit: 'sqft' as keyof typeof AREA_CONVERSIONS,
+    areaUnit: 'sqft' as AreaUnit,
+    subType: 'agricultural',
     rate: '' as string | number,
     rateUnit: 'total',
     location: '',
@@ -367,6 +437,9 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
       const payload: Partial<InventoryItem> = {
         title: formData.title,
         type: formData.type,
+        subType: formData.subType,
+        areaValue: Number(formData.areaValue),
+        areaUnit: formData.areaUnit,
         areaAcre: converted.acre,
         areaSqft: converted.sqft,
         areaSqYard: converted.sqyard,
@@ -415,6 +488,7 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
         type: 'zameen',
         areaValue: '',
         areaUnit: 'sqft',
+        subType: 'agricultural',
         rate: '',
         rateUnit: 'total',
         location: '',
@@ -468,13 +542,14 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
   };
 
   const startEdit = (item: InventoryItem) => {
+    const area = getAreaDisplay(item);
     setEditingItem(item);
     setFormData({
       title: item.title,
       type: item.type,
-      // We'll default to sqft for editing view or store the original unit used
-      areaValue: item.areaSqft || 0,
-      areaUnit: 'sqft',
+      areaValue: area?.value ?? '',
+      areaUnit: area?.unit ?? 'sqft',
+      subType: item.subType || (item.type === 'house' ? 'new' : item.type === 'zameen' ? 'agricultural' : 'commercial'),
       rate: item.rate,
       rateUnit: item.rateUnit,
       location: item.location,
@@ -502,16 +577,135 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
         );
     const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
                           item.location.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesFilter && matchesSearch;
+
+    const stateQuery = advancedFilters.state.trim().toLowerCase();
+    const cityQuery = advancedFilters.city.trim().toLowerCase();
+    const areaQuery = advancedFilters.area.trim().toLowerCase();
+    const locationText = `${item.location || ''} ${item.nearbyLocation || ''} ${item.landmark || ''}`.toLowerCase();
+    const matchesState = !stateQuery || locationText.includes(stateQuery);
+    const matchesCity = !cityQuery || locationText.includes(cityQuery);
+    const matchesArea = !areaQuery || locationText.includes(areaQuery);
+
+    const sizeComparable = (() => {
+      if (typeof item.areaSqft === 'number' && item.areaSqft > 0) return item.areaSqft;
+      if (typeof item.areaValue === 'number' && item.areaUnit && AREA_CONVERSIONS[item.areaUnit]) {
+        return item.areaValue * AREA_CONVERSIONS[item.areaUnit].sqft;
+      }
+      if (typeof item.areaSqYard === 'number' && item.areaSqYard > 0) return item.areaSqYard * AREA_CONVERSIONS.sqyard.sqft;
+      if (typeof item.areaSqMtr === 'number' && item.areaSqMtr > 0) return item.areaSqMtr * AREA_CONVERSIONS.sqmtr.sqft;
+      if (typeof item.areaAcre === 'number' && item.areaAcre > 0) return item.areaAcre * AREA_CONVERSIONS.acre.sqft;
+      if (typeof item.areaHectare === 'number' && item.areaHectare > 0) return item.areaHectare * AREA_CONVERSIONS.hectare.sqft;
+      return 0;
+    })();
+
+    const minSize = Number(advancedFilters.minSize) || 0;
+    const maxSize = Number(advancedFilters.maxSize) || 0;
+    const matchesMinSize = !advancedFilters.minSize || sizeComparable >= minSize;
+    const matchesMaxSize = !advancedFilters.maxSize || sizeComparable <= maxSize;
+
+    const budgetComparable = sizeComparable * Number(item.rate || 0);
+    const minBudget = Number(advancedFilters.minBudget) || 0;
+    const maxBudget = Number(advancedFilters.maxBudget) || 0;
+    const matchesMinBudget = !advancedFilters.minBudget || budgetComparable >= minBudget;
+    const matchesMaxBudget = !advancedFilters.maxBudget || budgetComparable <= maxBudget;
+
+    return matchesFilter && matchesSearch && matchesState && matchesCity && matchesArea && matchesMinSize && matchesMaxSize && matchesMinBudget && matchesMaxBudget;
   });
 
-  const areaUnits = Object.keys(AREA_CONVERSIONS) as Array<keyof typeof AREA_CONVERSIONS>;
-  const areaUnitLabels: Record<keyof typeof AREA_CONVERSIONS, string> = {
+  const areaUnits = Object.keys(AREA_CONVERSIONS) as Array<AreaUnit>;
+  const areaUnitLabels: Record<AreaUnit, string> = {
     acre: 'Acre',
     sqft: 'Sqft',
     sqyard: 'Sqyard',
     sqmtr: 'Sqmtr',
     hectare: 'Hectare',
+  };
+
+  const inventoryTypeLabels: Record<InventoryType, string> = {
+    zameen: 'Zameen',
+    house: 'House/Villa',
+    others: 'Others',
+    plot: 'Plot',
+  };
+
+  const subTypeOptionsByType: Record<InventoryType, Array<{ value: string; label: string }>> = {
+    house: [
+      { value: 'new', label: 'New' },
+      { value: 'resell', label: 'Resell' }
+    ],
+    zameen: [
+      { value: 'agricultural', label: 'Agricultural' },
+      { value: 'non_agricultural', label: 'Non Agricultural' }
+    ],
+    others: [
+      { value: 'warehouse', label: 'Warehouse' },
+      { value: 'hotel_resort', label: 'Hotel & Resort' },
+      { value: 'commercial', label: 'Commercial' },
+      { value: 'mixed_use', label: 'Mix Use' },
+      { value: 'industrial', label: 'Industrial' }
+    ],
+    plot: [
+      { value: 'warehouse', label: 'Warehouse' },
+      { value: 'hotel_resort', label: 'Hotel & Resort' },
+      { value: 'commercial', label: 'Commercial' },
+      { value: 'mixed_use', label: 'Mix Use' },
+      { value: 'industrial', label: 'Industrial' }
+    ]
+  };
+
+  const getSubTypeLabel = (itemType: InventoryType, subType?: string): string => {
+    if (!subType) return '';
+    return subTypeOptionsByType[itemType]?.find(opt => opt.value === subType)?.label || subType;
+  };
+
+  const getAreaDisplay = (item: InventoryItem): { value: number; unit: AreaUnit } | null => {
+    if (typeof item.areaValue === 'number' && item.areaUnit) {
+      return { value: item.areaValue, unit: item.areaUnit };
+    }
+
+    if (typeof item.areaSqft === 'number' && item.areaSqft > 0) return { value: item.areaSqft, unit: 'sqft' };
+    if (typeof item.areaSqYard === 'number' && item.areaSqYard > 0) return { value: item.areaSqYard, unit: 'sqyard' };
+    if (typeof item.areaSqMtr === 'number' && item.areaSqMtr > 0) return { value: item.areaSqMtr, unit: 'sqmtr' };
+    if (typeof item.areaAcre === 'number' && item.areaAcre > 0) return { value: item.areaAcre, unit: 'acre' };
+    if (typeof item.areaHectare === 'number' && item.areaHectare > 0) return { value: item.areaHectare, unit: 'hectare' };
+
+    return null;
+  };
+
+  const getPrimarySizeText = (item: InventoryItem): string => {
+    const area = getAreaDisplay(item);
+    if (area) return `${Number(area.value).toLocaleString()} ${area.unit}`;
+    return 'N/A';
+  };
+
+  const getTypeWithSubType = (item: InventoryItem): string => {
+    const baseType = inventoryTypeLabels[item.type];
+    const subType = getSubTypeLabel(item.type, item.subType);
+    return subType ? `${baseType} ${subType}` : baseType;
+  };
+
+  const shareOnWhatsApp = (item: InventoryItem) => {
+    const mapLink = `https://www.google.com/maps?q=${item.latitude},${item.longitude}`;
+    const imageLinks = item.photos?.length
+      ? item.photos.map((url, idx) => `- Image ${idx + 1}: ${url}`).join('\n')
+      : '- No images available';
+
+    const message = [
+      `*${item.title}*`,
+      '',
+      '1. Property Images:',
+      imageLinks,
+      '',
+      `2. Location: ${item.location}`,
+      mapLink,
+      '',
+      `3. Type: ${getTypeWithSubType(item)}`,
+      '',
+      `4. Size: ${getPrimarySizeText(item)}`
+    ].join('\n');
+
+    const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
   };
 
   return (
@@ -586,6 +780,73 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
         </div>
       </div>
 
+      <div className="bg-white/60 p-3 sm:p-4 rounded-[28px] border border-slate-100">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
+          <input
+            type="text"
+            value={advancedFilters.state}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, state: e.target.value }))}
+            placeholder="State"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <input
+            type="text"
+            value={advancedFilters.city}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, city: e.target.value }))}
+            placeholder="City"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <input
+            type="text"
+            value={advancedFilters.area}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, area: e.target.value }))}
+            placeholder="Area / Locality"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <input
+            type="number"
+            min="0"
+            value={advancedFilters.minBudget}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, minBudget: e.target.value }))}
+            placeholder="Min Budget"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <input
+            type="number"
+            min="0"
+            value={advancedFilters.maxBudget}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, maxBudget: e.target.value }))}
+            placeholder="Max Budget"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <input
+            type="number"
+            min="0"
+            value={advancedFilters.minSize}
+            onChange={e => setAdvancedFilters(prev => ({ ...prev, minSize: e.target.value }))}
+            placeholder="Min Size (sqft)"
+            className="px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+          />
+          <div className="flex gap-2">
+            <input
+              type="number"
+              min="0"
+              value={advancedFilters.maxSize}
+              onChange={e => setAdvancedFilters(prev => ({ ...prev, maxSize: e.target.value }))}
+              placeholder="Max Size (sqft)"
+              className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl outline-none focus:ring-4 focus:ring-blue-100 text-sm font-medium text-slate-700"
+            />
+            <button
+              type="button"
+              onClick={() => setAdvancedFilters({ state: '', city: '', area: '', minBudget: '', maxBudget: '', minSize: '', maxSize: '' })}
+              className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Grid - Improved spacing and density */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6 px-1">
         <AnimatePresence mode="popLayout">
@@ -619,7 +880,7 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                     {item.status.replace('_', ' ')}
                   </div>
                   <div className="px-4 py-1.5 bg-black/60 backdrop-blur-md text-white rounded-full text-[9px] font-black uppercase tracking-[0.2em]">
-                    {item.type}
+                    {getTypeWithSubType(item)}
                   </div>
                 </div>
 
@@ -676,13 +937,26 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                     <MapPin size={14} className="text-blue-500" />
                     {item.location}
                   </div>
+                  {item.subType && (
+                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                      {getTypeWithSubType(item)}
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 bg-slate-50 rounded-2xl">
                     <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 leading-none">Area</p>
                     <p className="text-slate-900 font-mono font-bold text-lg leading-none">
-                      {item.areaValue} <span className="text-[10px] text-slate-400 font-sans tracking-normal ml-0.5">{item.areaUnit}</span>
+                      {(() => {
+                        const area = getAreaDisplay(item);
+                        if (!area) return 'N/A';
+                        return (
+                          <>
+                            {Number(area.value).toLocaleString()} <span className="text-[10px] text-slate-400 font-sans tracking-normal ml-0.5">{area.unit}</span>
+                          </>
+                        );
+                      })()}
                     </p>
                   </div>
                   <div className="p-4 bg-blue-50 rounded-2xl">
@@ -704,6 +978,14 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                     </div>
                   </div>
                   <div className="flex gap-1.5">
+                    <button
+                      onClick={() => shareOnWhatsApp(item)}
+                      className="w-10 h-10 flex items-center justify-center text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition-all"
+                      title="Share on WhatsApp"
+                      aria-label="Share on WhatsApp"
+                    >
+                      <Share2 size={18} />
+                    </button>
                     <button 
                       onClick={() => startEdit(item)}
                       className="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
@@ -798,20 +1080,39 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                               />
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                               <div className="space-y-2">
                                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] ml-1">Property Type</label>
                                 <select 
                                   value={formData.type}
-                                  onChange={e => setFormData({...formData, type: e.target.value as InventoryType})}
+                                  onChange={e => {
+                                    const nextType = e.target.value as InventoryType;
+                                    const defaultSubType = subTypeOptionsByType[nextType]?.[0]?.value || '';
+                                    setFormData({ ...formData, type: nextType, subType: defaultSubType });
+                                  }}
                                   className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none font-black text-slate-700 transition-all"
                                 >
                                   <option value="zameen">Zameen</option>
-                                  <option value="plot">Plot</option>
                                   <option value="house">House/Villa</option>
+                                  <option value="others">Others</option>
+                                  <option value="plot">Plot (Legacy)</option>
                                 </select>
                               </div>
                               <div className="space-y-2">
+                                <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] ml-1">Category</label>
+                                <select
+                                  value={formData.subType}
+                                  onChange={e => setFormData({ ...formData, subType: e.target.value })}
+                                  className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none font-black text-slate-700 transition-all"
+                                >
+                                  {(subTypeOptionsByType[formData.type] || []).map(opt => (
+                                    <option key={opt.value} value={opt.value}>
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="space-y-2 sm:col-span-2">
                                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] ml-1">Rate (₹)</label>
                                 <input 
                                   required
@@ -1002,14 +1303,14 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
                              />
                            </div>
 
-                           <div className="grid grid-cols-2 gap-4">
+                           <div className="grid grid-cols-2 gap-3 sm:gap-4">
                               {areaUnits.map(u => {
                                   if (u === formData.areaUnit) return null;
                                   const val = formData.areaValue ? convertArea(Number(formData.areaValue), formData.areaUnit)[u as keyof typeof AREA_CONVERSIONS] : '-';
                                   return (
-                                      <div key={u} className="bg-white min-h-[56px] px-4 py-3 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
-                                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-wide">{areaUnitLabels[u]}</p>
-                                          <p className="text-sm font-mono font-bold tabular-nums text-slate-800 text-right">{val}</p>
+                                      <div key={u} className="bg-white min-h-[56px] px-3 py-2.5 sm:px-4 sm:py-3 rounded-xl border border-slate-200 flex flex-col items-start justify-center gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                                          <p className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wide">{areaUnitLabels[u]}</p>
+                                          <p className="w-full text-right text-xs sm:text-sm font-mono font-bold tabular-nums text-slate-800 break-all">{val}</p>
                                       </div>
                                   )
                               })}
@@ -1160,3 +1461,5 @@ export default function InventoryManagement({ user, onBack }: InventoryManagemen
     </div>
   );
 }
+
+
